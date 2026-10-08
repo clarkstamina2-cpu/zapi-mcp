@@ -1,0 +1,6 @@
+.env
+*.log
+__pycache__/
+*.pyc
+scheduled_messages.json
+.DS_Store
