@@ -15,6 +15,7 @@ import asyncio
 import threading
 import logging
 import secrets
+import unicodedata
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Union
 import httpx
@@ -75,26 +76,41 @@ def load_accounts() -> List[Dict[str, Any]]:
         logger.warning("[CONFIG] Variavel de ambiente ACCOUNTS nao informada. Configure no painel do Easypanel.")
     return DEFAULT_ACCOUNTS_FALLBACK
 
+def _normalize_str(text: Any) -> str:
+    """Remove acentos, espaços extras e converte para minúsculas para comparação inteligente."""
+    return unicodedata.normalize("NFKD", str(text)).encode("ASCII", "ignore").decode("ASCII").strip().lower()
+
 def resolve_single_account(identifier: str) -> Optional[Dict[str, Any]]:
-    raw = str(identifier).strip().lower()
+    raw = str(identifier).strip()
+    norm_target = _normalize_str(raw)
     accounts = load_accounts()
 
-    # 1. Busca por nome, ID ou alias
+    # 1. Busca inteligente por ID, Nome Completo, Primeiro Nome ou Apelidos/Aliases
     for acc in accounts:
-        if raw == str(acc.get("id")).lower():
+        # ID
+        if norm_target == _normalize_str(acc.get("id", "")):
             return acc
-        if raw == acc.get("name", "").lower():
+
+        # Nome completo e Primeiro Nome
+        full_name = str(acc.get("name", "")).strip()
+        norm_full = _normalize_str(full_name)
+        norm_first = norm_full.split()[0] if norm_full else ""
+
+        if norm_target in (norm_full, norm_first):
             return acc
-        aliases = [str(a).lower() for a in acc.get("aliases", [])]
-        if raw in aliases:
-            return acc
+
+        # Apelidos / Aliases
+        for a in acc.get("aliases", []):
+            if norm_target == _normalize_str(a):
+                return acc
 
     # 2. Busca por dígitos do telefone
     clean_digits = "".join(c for c in raw if c.isdigit())
-    for acc in accounts:
-        acc_phone = "".join(c for c in str(acc.get("phone", "")) if c.isdigit())
-        if clean_digits and (clean_digits == acc_phone or acc_phone.endswith(clean_digits)):
-            return acc
+    if clean_digits:
+        for acc in accounts:
+            acc_phone = "".join(c for c in str(acc.get("phone", "")) if c.isdigit())
+            if clean_digits == acc_phone or acc_phone.endswith(clean_digits):
+                return acc
 
     # 3. Número de telefone avulso direto
     if len(clean_digits) >= 10:
