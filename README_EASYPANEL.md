@@ -33,6 +33,10 @@ HOST=0.0.0.0
 ZAPI_INSTANCE_ID=SEU_INSTANCE_ID_AQUI
 ZAPI_TOKEN=SEU_TOKEN_AQUI
 ZAPI_CLIENT_TOKEN=SEU_CLIENT_TOKEN_AQUI
+
+# Camada de Segurança (Token secreto para barrar acessos não autorizados)
+MCP_AUTH_TOKEN=SEU_TOKEN_SECRETO_AQUI
+
 ACCOUNTS=[{"id":"1","name":"Nome do Account 1","phone":"5511999999999","role":"Account Manager","aliases":["account1"]},{"id":"2","name":"Nome do Account 2","phone":"5511888888888","role":"Account Manager","aliases":["account2"]}]
 ```
 
@@ -50,39 +54,53 @@ Resposta esperada:
   "status": "healthy",
   "transport": "streamable-http",
   "endpoint": "/mcp",
+  "auth_enabled": true,
   "instance_configured": true,
   "accounts_count": 2,
   "accounts": ["Nome 1 (5511999999999)", "Nome 2 (5511888888888)"]
 }
 ```
 
-A URL que você entregará para o seu chefe será:  
-**`https://zapi.suaempresa.com.br/mcp`**
-
 ---
 
-## 🔌 Como o seu Chefe Pluga no Claude Desktop
+## 🔒 Como o seu Chefe se Conecta com Segurança
 
-No Claude Desktop do chefe, ele adiciona no `claude_desktop_config.json`:
+Você pode fornecer o acesso de duas formas super fáceis:
 
-### Opção 1: Conexão Direta Streamable HTTP (Recomendada)
+### Opção 1: Via URL com Token (O jeito mais prático - "Pluga o link e plau")
+O chefe só cola a URL com o token no `claude_desktop_config.json`:
+
 ```json
 {
   "mcpServers": {
     "whatsapp-accounts": {
-      "url": "https://zapi.suaempresa.com.br/mcp"
+      "url": "https://zapi.suaempresa.com.br/mcp?token=SEU_TOKEN_SECRETO_AQUI"
     }
   }
 }
 ```
 
-### Opção 2: Conexão via Bridge Universal (caso a versão do Claude dele utilize npx)
+### Opção 2: Via Header de Autorização Bearer
+```json
+{
+  "mcpServers": {
+    "whatsapp-accounts": {
+      "url": "https://zapi.suaempresa.com.br/mcp",
+      "headers": {
+        "Authorization": "Bearer SEU_TOKEN_SECRETO_AQUI"
+      }
+    }
+  }
+}
+```
+
+### Opção 3: Conexão via Bridge Universal (npx mcp-remote)
 ```json
 {
   "mcpServers": {
     "whatsapp-accounts": {
       "command": "npx",
-      "args": ["-y", "mcp-remote", "https://zapi.suaempresa.com.br/mcp"]
+      "args": ["-y", "mcp-remote", "https://zapi.suaempresa.com.br/mcp?token=SEU_TOKEN_SECRETO_AQUI"]
     }
   }
 }

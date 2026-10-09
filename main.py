@@ -14,11 +14,14 @@ import time
 import asyncio
 import threading
 import logging
+import secrets
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Union
 import httpx
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+from starlette.middleware import Middleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from fastmcp import FastMCP
 
 # ==============================================================================
@@ -37,6 +40,9 @@ logger = logging.getLogger("zapi-mcp")
 ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID", "").strip()
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN", "").strip()
 ZAPI_CLIENT_TOKEN = os.getenv("ZAPI_CLIENT_TOKEN", "").strip()
+
+# Token de autenticação para o MCP (Bearer Header ou Query Param ?token=...)
+MCP_AUTH_TOKEN = os.getenv("MCP_AUTH_TOKEN", "").strip()
 
 PORT = int(os.getenv("PORT", "8000"))
 HOST = os.getenv("HOST", "0.0.0.0")
@@ -66,7 +72,7 @@ def load_accounts() -> List[Dict[str, Any]]:
         except Exception as e:
             logger.error(f"Erro ao parsear ACCOUNTS da variável de ambiente: {e}")
     else:
-        logger.warning("⚠️ Variável de ambiente ACCOUNTS não informada. Configure no painel do Easypanel.")
+        logger.warning("[CONFIG] Variavel de ambiente ACCOUNTS nao informada. Configure no painel do Easypanel.")
     return DEFAULT_ACCOUNTS_FALLBACK
 
 def resolve_single_account(identifier: str) -> Optional[Dict[str, Any]]:
@@ -306,6 +312,61 @@ def start_scheduler_thread():
     t.start()
 
 # ==============================================================================
+# CAMADA DE SEGURANÇA E AUTENTICAÇÃO DO MCP
+# ==============================================================================
+class TokenAuthMiddleware(BaseHTTPMiddleware):
+    """
+    Middleware de segurança para validar tokens de acesso nas requisições ao MCP.
+    Suporta:
+      - Header 'Authorization: Bearer <token>' ou 'Authorization: <token>'
+      - Header customizado 'X-MCP-Token: <token>' ou 'X-API-Key: <token>'
+      - Query parameter '?token=<token>' ou '?api_key=<token>'
+    """
+    async def dispatch(self, request: Request, call_next):
+        # 1. Permite requisições preflight do navegador (CORS)
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
+        # 2. Rotas públicas de diagnóstico e saúde da VPS
+        if request.url.path in ["/", "/health", "/ping"]:
+            return await call_next(request)
+
+        # 3. Se MCP_AUTH_TOKEN não estiver configurado no Easypanel, permite acesso aberto
+        if not MCP_AUTH_TOKEN:
+            return await call_next(request)
+
+        # 4. Extração do token fornecido
+        provided_token = None
+        auth_header = request.headers.get("Authorization", "").strip()
+        if auth_header.startswith("Bearer "):
+            provided_token = auth_header[7:].strip()
+        elif auth_header:
+            provided_token = auth_header
+        elif "x-mcp-token" in request.headers:
+            provided_token = request.headers.get("x-mcp-token", "").strip()
+        elif "x-api-key" in request.headers:
+            provided_token = request.headers.get("x-api-key", "").strip()
+        elif "token" in request.query_params:
+            provided_token = request.query_params.get("token", "").strip()
+        elif "api_key" in request.query_params:
+            provided_token = request.query_params.get("api_key", "").strip()
+
+        # 5. Validação com tempo constante (proteção contra timing attacks)
+        if not provided_token or not secrets.compare_digest(provided_token, MCP_AUTH_TOKEN):
+            client_ip = request.client.host if request.client else "desconhecido"
+            logger.warning(f"[401 Unauthorized] Tentativa de acesso bloqueada em {request.url.path} (IP: {client_ip}) - Token ausente ou invalido")
+            return JSONResponse(
+                {
+                    "error": "Unauthorized",
+                    "message": "Token de autenticacao ausente ou invalido. Forneca o token via Header 'Authorization: Bearer <token>' ou Query Param '?token=<token>'."
+                },
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"}
+            )
+
+        return await call_next(request)
+
+# ==============================================================================
 # FASTMCP SERVER (STREAMABLE HTTP)
 # ==============================================================================
 mcp = FastMCP("zapi-whatsapp")
@@ -318,6 +379,7 @@ async def health_check(request: Request) -> JSONResponse:
         "status": "healthy",
         "transport": "streamable-http",
         "endpoint": "/mcp",
+        "auth_enabled": bool(MCP_AUTH_TOKEN),
         "instance_configured": bool(ZAPI_INSTANCE_ID),
         "accounts_count": len(accounts),
         "accounts": [f"{a.get('name')} ({a.get('phone')})" for a in accounts]
@@ -329,8 +391,9 @@ async def root_view(request: Request) -> JSONResponse:
         "service": "Z-API WhatsApp MCP Server",
         "protocol": "Streamable HTTP",
         "mcp_endpoint": "/mcp",
+        "auth_enabled": bool(MCP_AUTH_TOKEN),
         "health": "/health",
-        "docs": "Conecte o Claude Desktop informando a URL terminando com /mcp"
+        "docs": "Conecte o Claude Desktop informando a URL terminando com /mcp (ou /mcp?token=<token> se autenticado)"
     })
 
 # Ferramentas do MCP
@@ -477,10 +540,17 @@ def cancel_scheduled_message(job_id: str) -> str:
 # ==============================================================================
 if __name__ == "__main__":
     start_scheduler_thread()
+
+    if MCP_AUTH_TOKEN:
+        logger.info("[AUTH ATIVA] Requisicoes ao /mcp exigem MCP_AUTH_TOKEN valido.")
+    else:
+        logger.warning("[AUTH DESATIVADA] MCP_AUTH_TOKEN nao definido. O servidor esta acessivel sem senha.")
+
     logger.info(f"Iniciando Z-API MCP Server (Streamable HTTP) em http://{HOST}:{PORT}/mcp")
     mcp.run(
         transport="http",
         host=HOST,
         port=PORT,
-        path="/mcp"
+        path="/mcp",
+        middleware=[Middleware(TokenAuthMiddleware)],
     )
