@@ -415,11 +415,18 @@ async def root_view(request: Request) -> JSONResponse:
 # Ferramentas do MCP
 @mcp.tool()
 def list_accounts() -> str:
-    """Lista todos os accounts configurados no sistema (lidos das variáveis do Easypanel)."""
+    """
+    Lista todos os accounts e membros da equipe cadastrados no Easypanel com seus nomes, telefones e apelidos válidos.
+    Consulte esta ferramenta para descobrir os nomes ou apelidos aceitos para envio.
+    """
     accounts = load_accounts()
+    if not accounts:
+        return "⚠️ Nenhum account cadastrado na variável de ambiente ACCOUNTS do Easypanel."
     lines = ["📋 Accounts Cadastrados no Easypanel:"]
     for acc in accounts:
-        lines.append(f"• [{acc.get('id')}] {acc.get('name')} — WhatsApp: {acc.get('phone')} ({acc.get('role', 'Account')})")
+        aliases_str = ", ".join(acc.get("aliases", []))
+        alias_info = f" | Apelidos aceitos: [{aliases_str}]" if aliases_str else ""
+        lines.append(f"• [{acc.get('id')}] {acc.get('name')} — WhatsApp: {acc.get('phone')} ({acc.get('role', 'Account')}){alias_info}")
     return "\n".join(lines)
 
 @mcp.tool()
@@ -432,13 +439,16 @@ async def send_whatsapp(
     Envia uma ou mais mensagens imediatas via WhatsApp Z-API.
     
     Args:
-        to: Destinatário(s). Aceita 'junior', 'jorge', 'todos' (para ambos), lista ['junior', 'jorge'] ou número de WhatsApp.
+        to: Destinatário(s). Aceita nome, primeiro nome ou apelido de QUALQUER account cadastrado
+            (ex: 'kirla', 'roniel', 'roni', 'angelica', 'angel', 'junior', 'jorge', etc.),
+            'todos' (para disparar para toda a equipe), lista de destinatários (ex: ['kirla', 'roni']),
+            ou número de WhatsApp avulso com DDD (ex: '5585999999999' ou '14997560730').
         messages: Mensagem única de texto ou lista de mensagens sequenciais (balões separados).
         dry_run: Se True, apenas simula o envio sem disparar no WhatsApp real.
     """
     recipients = resolve_recipients(to)
     if not recipients:
-        return f"❌ Erro: Nenhum destinatário válido encontrado para '{to}'."
+        return f"❌ Erro: Nenhum destinatário válido encontrado para '{to}'. Consulte list_accounts() para ver a lista de nomes e apelidos aceitos."
 
     msg_list = [messages] if isinstance(messages, str) else [str(m) for m in messages]
     total_msgs = 0
@@ -480,7 +490,9 @@ def schedule_whatsapp(
     O agendamento roda 24/7 na VPS, funcionando mesmo se o computador do usuário estiver desligado.
     
     Args:
-        to: Destinatário(s) ('junior', 'jorge', 'todos', etc.).
+        to: Destinatário(s). Aceita nome, primeiro nome ou apelido de QUALQUER account cadastrado
+            (ex: 'kirla', 'roniel', 'roni', 'angelica', 'angel', 'junior', 'jorge', etc.),
+            'todos' (para disparar para toda a equipe), lista de nomes, ou número de telefone direto.
         run_at: Horário ou expressão futura (ex: '17:30', '+30m', '+2h', 'YYYY-MM-DD HH:MM').
         messages: Mensagem única ou lista de mensagens sequenciais.
         dry_run: Se True, simula o agendamento.
