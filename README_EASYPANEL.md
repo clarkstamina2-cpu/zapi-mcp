@@ -1,106 +1,76 @@
-# 🚀 Servidor MCP Z-API (Streamable HTTP /mcp) para Easypanel / VPS
+# 🚀 Servidor MCP WhatsApp (Evolution API) — Streamable HTTP /mcp para Easypanel / VPS
 
-Servidor MCP moderno utilizando o protocolo oficial **Streamable HTTP** no endpoint **`/mcp`** (substituindo o antigo padrão SSE legado).
+Servidor MCP moderno utilizando o protocolo oficial **Streamable HTTP** no endpoint **`/mcp`**, enviando mensagens de WhatsApp pela **Evolution API v2**.
 
 ---
 
 ## 💎 Benefícios desta Arquitetura
 
-1. **Protocolo Moderno:** Roda via **Streamable HTTP** (`/mcp`), padrão atual e de alta performance do Model Context Protocol.
-2. **100% Configurado pelo Easypanel:** Credenciais da Z-API e contatos dos Accounts são controlados exclusivamente pelas variáveis de ambiente do painel. Adicionar um novo account no futuro leva 5 segundos.
-3. **Agendamento 24/7:** O servidor roda ininterruptamente na VPS. O chefe pode agendar um envio e desligar o computador que a mensagem é disparada pontualmente.
-4. **"Pluga o Link e Plau":** O chefe só cola a URL no Claude Desktop e ganha as ferramentas nativas 🔨.
-5. **Seguro para Git:** Código 100% limpo, sem nenhum token ou telefone real hardcoded.
+1. **Protocolo Moderno:** Roda via **Streamable HTTP** (`/mcp`), padrão atual do Model Context Protocol.
+2. **100% Configurado pelo Easypanel:** Credenciais da Evolution API e contatos dos Accounts são controlados exclusivamente pelas variáveis de ambiente do painel.
+3. **Agendamento 24/7:** O servidor roda ininterruptamente na VPS, no fuso de Brasília. Dá pra agendar um envio e desligar o computador.
+4. **"Pluga o Link e Plau":** É só colar a URL no Claude e ganhar as ferramentas 🔨.
+5. **Seguro:** Token obrigatório na URL, nenhuma credencial no código. O servidor não sobe se faltar alguma variável.
 
 ---
 
 ## 🛠️ Passo a Passo no Easypanel
 
 ### 1. Criar o App
-- No seu Easypanel, vá em **+ Service** ➔ **App** (ex: `zapi-mcp`).
-- Aponte para o repositório Git ou faça upload da pasta `zapi-mcp-easypanel`. O Easypanel detectará o `Dockerfile` automaticamente.
+- No Easypanel, vá em **+ Service** ➔ **App**.
+- Aponte para este repositório Git. O Easypanel detecta o `Dockerfile` automaticamente.
 
 ### 2. Porta e Domínio
 - **Porta interna:** `8000`
-- **Domínio (Domains):** Adicione seu subdomínio (ex: `zapi.suaempresa.com.br`). O Easypanel gera o SSL (HTTPS) automaticamente.
+- **Domínio (Domains):** adicione o subdomínio com HTTPS ligado.
 
-### 3. Variáveis de Ambiente (Aba "Environment")
-Cole estas variáveis preenchendo com os seus dados reais:
+### 3. Volume (para a fila de agendamentos sobreviver a deploys)
+- Aba **Mounts** ➔ volume montado em `/data`.
+
+### 4. Variáveis de Ambiente (Aba "Environment")
 
 ```env
-PORT=8000
-HOST=0.0.0.0
-ZAPI_INSTANCE_ID=SEU_INSTANCE_ID_AQUI
-ZAPI_TOKEN=SEU_TOKEN_AQUI
-ZAPI_CLIENT_TOKEN=SEU_CLIENT_TOKEN_AQUI
-
-# Camada de Segurança (Token secreto para barrar acessos não autorizados)
-MCP_AUTH_TOKEN=SEU_TOKEN_SECRETO_AQUI
-
-ACCOUNTS=[{"id":"1","name":"Nome do Account 1","phone":"5511999999999","role":"Account Manager","aliases":["account1"]},{"id":"2","name":"Nome do Account 2","phone":"5511888888888","role":"Account Manager","aliases":["account2"]}]
+MCP_TOKEN=SEU_TOKEN_SECRETO_AQUI
+EVOLUTION_API_URL=https://sua-evolution.suaempresa.com.br
+EVOLUTION_API_KEY=SUA_API_KEY_AQUI
+EVOLUTION_INSTANCE=Nome da Instancia
+ACCOUNTS=[{"id":"1","name":"Nome do Account 1","phone":"5511999999999","role":"Account Manager","aliases":["account1"]}]
 ```
+
+Gerar um `MCP_TOKEN` forte: `python -c "import secrets; print(secrets.token_urlsafe(32))"`
 
 Clique em **Deploy**! 🚀
 
 ---
 
 ## 🌐 Teste de Saúde
-Acesse no seu navegador:  
-`https://zapi.suaempresa.com.br/health`
+`https://<seu-dominio>/health` (público, não expõe nomes nem telefones)
 
-Resposta esperada:
 ```json
-{
-  "status": "healthy",
-  "transport": "streamable-http",
-  "endpoint": "/mcp",
-  "auth_enabled": true,
-  "instance_configured": true,
-  "accounts_count": 2,
-  "accounts": ["Nome 1 (5511999999999)", "Nome 2 (5511888888888)"]
-}
+{"status": "ok", "transport": "streamable-http", "endpoint": "/mcp", "provider": "evolution-api", "accounts_count": 2}
 ```
 
 ---
 
-## 🔒 Como o seu Chefe se Conecta com Segurança
-
-Você pode fornecer o acesso de duas formas super fáceis:
-
-### Opção 1: Via URL com Token (O jeito mais prático - "Pluga o link e plau")
-O chefe só cola a URL com o token no `claude_desktop_config.json`:
+## 🔒 Conectando no Claude
 
 ```json
 {
   "mcpServers": {
     "whatsapp-accounts": {
-      "url": "https://zapi.suaempresa.com.br/mcp?token=SEU_TOKEN_SECRETO_AQUI"
+      "url": "https://<seu-dominio>/mcp?token=SEU_TOKEN_SECRETO_AQUI"
     }
   }
 }
 ```
 
-### Opção 2: Via Header de Autorização Bearer
-```json
-{
-  "mcpServers": {
-    "whatsapp-accounts": {
-      "url": "https://zapi.suaempresa.com.br/mcp",
-      "headers": {
-        "Authorization": "Bearer SEU_TOKEN_SECRETO_AQUI"
-      }
-    }
-  }
-}
-```
-
-### Opção 3: Conexão via Bridge Universal (npx mcp-remote)
+Ou via bridge (`npx mcp-remote`):
 ```json
 {
   "mcpServers": {
     "whatsapp-accounts": {
       "command": "npx",
-      "args": ["-y", "mcp-remote", "https://zapi.suaempresa.com.br/mcp?token=SEU_TOKEN_SECRETO_AQUI"]
+      "args": ["-y", "mcp-remote", "https://<seu-dominio>/mcp?token=SEU_TOKEN_SECRETO_AQUI"]
     }
   }
 }
@@ -108,7 +78,20 @@ O chefe só cola a URL com o token no `claude_desktop_config.json`:
 
 ---
 
-## 🔨 Ferramentas Disponíveis no Claude:
+## 🧪 Testes
+
+```bash
+MCP_URL=https://<seu-dominio> MCP_TOKEN=xxx python test_server.py
+```
+
+Para incluir um envio real (o número precisa estar conectado na instância):
+```bash
+MCP_URL=https://<seu-dominio> MCP_TOKEN=xxx TEST_PHONE=5585999999999 python test_server.py
+```
+
+---
+
+## 🔨 Ferramentas Disponíveis no Claude
 
 - `list_accounts()`: Lista os accounts cadastrados no Easypanel.
 - `send_whatsapp(to, messages)`: Disparo imediato para contas ou telefone avulso.

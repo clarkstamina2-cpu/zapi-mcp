@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-zapi-mcp-easypanel — Servidor MCP Moderno (Streamable HTTP /mcp) para WhatsApp Z-API
+whatsapp-mcp — Servidor MCP Moderno (Streamable HTTP /mcp) para WhatsApp via Evolution API v2
 Desenvolvido para VPS (Easypanel / Docker).
 Utiliza transporte moderno Streamable HTTP no endpoint /mcp (substituto oficial do SSE legado).
 Todas as credenciais e accounts são 100% configuráveis via Variáveis de Ambiente no Easypanel.
@@ -9,20 +9,21 @@ Todas as credenciais e accounts são 100% configuráveis via Variáveis de Ambie
 
 import os
 import sys
+import hmac
 import json
-import time
 import asyncio
 import threading
 import logging
-import secrets
 import unicodedata
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional, Union
+from urllib.parse import parse_qs, quote
+from zoneinfo import ZoneInfo
 import httpx
+import uvicorn
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.middleware import Middleware
-from starlette.middleware.base import BaseHTTPMiddleware
 from fastmcp import FastMCP
 
 # ==============================================================================
@@ -33,17 +34,23 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger("zapi-mcp")
+logger = logging.getLogger("whatsapp-mcp")
 
 # ==============================================================================
 # VARIÁVEIS DE AMBIENTE (CONFIGURÁVEIS NO PAINEL DO EASYPANEL)
 # ==============================================================================
-ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID", "").strip()
-ZAPI_TOKEN = os.getenv("ZAPI_TOKEN", "").strip()
-ZAPI_CLIENT_TOKEN = os.getenv("ZAPI_CLIENT_TOKEN", "").strip()
+REQUIRED_ENV = ("MCP_TOKEN", "EVOLUTION_API_URL", "EVOLUTION_API_KEY", "EVOLUTION_INSTANCE")
+_missing = [name for name in REQUIRED_ENV if not os.getenv(name, "").strip()]
+if _missing:
+    sys.exit(f"ERRO: variável(is) de ambiente obrigatória(s) ausente(s): {', '.join(_missing)} (configure no Easypanel).")
 
-# Token de autenticação para o MCP (Bearer Header ou Query Param ?token=...)
-MCP_AUTH_TOKEN = os.getenv("MCP_AUTH_TOKEN", "").strip()
+# Token de autenticação para o MCP (Query Param ?token=...)
+MCP_TOKEN = os.environ["MCP_TOKEN"].strip()
+
+# Evolution API v2 (ex: https://waha.stamina.digital)
+EVOLUTION_API_URL = os.environ["EVOLUTION_API_URL"].strip().rstrip("/")
+EVOLUTION_API_KEY = os.environ["EVOLUTION_API_KEY"].strip()
+EVOLUTION_INSTANCE = os.environ["EVOLUTION_INSTANCE"].strip()
 
 PORT = int(os.getenv("PORT", "8000"))
 HOST = os.getenv("HOST", "0.0.0.0")
@@ -51,8 +58,15 @@ HOST = os.getenv("HOST", "0.0.0.0")
 DATA_DIR = os.getenv("DATA_DIR", "/data" if os.path.exists("/data") else os.path.dirname(os.path.abspath(__file__)))
 QUEUE_FILE = os.path.join(DATA_DIR, "scheduled_messages.json")
 
-def get_zapi_endpoint() -> str:
-    return f"https://api.z-api.io/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
+# Fuso dos agendamentos (o container roda em UTC; sem isso "17:30" dispararia às 14:30 de Brasília)
+TIMEZONE = ZoneInfo(os.getenv("TIMEZONE", "America/Sao_Paulo"))
+
+def now_local() -> datetime:
+    return datetime.now(TIMEZONE).replace(tzinfo=None)
+
+def get_evolution_endpoint() -> str:
+    # O nome da instância pode ter espaços, colchetes e acentos (ex: "[STM] Notificações")
+    return f"{EVOLUTION_API_URL}/message/sendText/{quote(EVOLUTION_INSTANCE, safe='')}"
 
 # ==============================================================================
 # GESTÃO DINÂMICA DE ACCOUNTS VIA VARIÁVEL DE AMBIENTE
@@ -158,13 +172,13 @@ def resolve_recipients(targets: Union[str, List[str]]) -> List[Dict[str, Any]]:
     return resolved
 
 # ==============================================================================
-# DISPARO VIA Z-API (DOCUMENTAÇÃO OFICIAL)
+# DISPARO VIA EVOLUTION API v2 (DOCUMENTAÇÃO OFICIAL)
 # ==============================================================================
-async def send_zapi_message(phone: str, message: str, dry_run: bool = False) -> Dict[str, Any]:
+async def send_whatsapp_message(phone: str, message: str, dry_run: bool = False) -> Dict[str, Any]:
     """
-    POST https://api.z-api.io/instances/{instanceId}/token/{token}/send-text
-    Headers: Client-Token e Content-Type: application/json
-    Payload: {"phone": "...", "message": "...", "delayMessage": 2}
+    POST {EVOLUTION_API_URL}/message/sendText/{instance}
+    Headers: apikey e Content-Type: application/json
+    Payload: {"number": "...", "text": "...", "delay": 2000}
     """
     clean_phone = "".join(c for c in str(phone) if c.isdigit())
     if not clean_phone.startswith("55"):
@@ -179,29 +193,27 @@ async def send_zapi_message(phone: str, message: str, dry_run: bool = False) -> 
             "status": "SIMULATED"
         }
 
-    if not ZAPI_INSTANCE_ID or not ZAPI_TOKEN or not ZAPI_CLIENT_TOKEN:
-        err_msg = "Credenciais da Z-API incompletas. Configure ZAPI_INSTANCE_ID, ZAPI_TOKEN e ZAPI_CLIENT_TOKEN no Easypanel."
-        logger.error(err_msg)
-        return {"success": False, "phone": clean_phone, "error": err_msg}
-
-    url = get_zapi_endpoint()
+    url = get_evolution_endpoint()
     headers = {
-        "Client-Token": ZAPI_CLIENT_TOKEN,
+        "apikey": EVOLUTION_API_KEY,
         "Content-Type": "application/json"
     }
     payload = {
-        "phone": clean_phone,
-        "message": message.strip(),
-        "delayMessage": 2  # Parâmetro oficial da Z-API para delay humanizado anti-ban
+        "number": clean_phone,
+        "text": message.strip(),
+        "delay": 2000  # Em milissegundos: mostra "digitando..." antes do envio (delay humanizado anti-ban)
     }
 
     try:
         async with httpx.AsyncClient(timeout=25.0) as client:
             resp = await client.post(url, headers=headers, json=payload)
-            data = resp.json() if resp.content else {}
+            try:
+                data = resp.json() if resp.content else {}
+            except ValueError:
+                data = {"raw": resp.text[:500]}
             is_ok = resp.status_code in (200, 201)
             if not is_ok:
-                logger.error(f"Erro Z-API ({resp.status_code}): {data}")
+                logger.error(f"Erro Evolution API ({resp.status_code}): {data}")
             return {
                 "success": is_ok,
                 "status_code": resp.status_code,
@@ -209,7 +221,7 @@ async def send_zapi_message(phone: str, message: str, dry_run: bool = False) -> 
                 "response": data
             }
     except Exception as e:
-        logger.error(f"Erro de conexão com Z-API: {e}")
+        logger.error(f"Erro de conexão com a Evolution API: {e}")
         return {
             "success": False,
             "phone": clean_phone,
@@ -237,7 +249,7 @@ def _save_queue(queue: List[Dict[str, Any]]):
 
 def parse_time_expression(expr: str) -> datetime:
     raw = expr.strip().lower()
-    now = datetime.now()
+    now = now_local()
 
     if raw.startswith("+"):
         unit = raw[-1]
@@ -285,7 +297,7 @@ async def _scheduler_loop():
     logger.info("Worker de agendamentos 24/7 iniciado na VPS.")
     while True:
         try:
-            now = datetime.now()
+            now = now_local()
             queue = _load_queue()
             dirty = False
 
@@ -300,7 +312,7 @@ async def _scheduler_loop():
 
                         results = []
                         for idx, m in enumerate(msgs):
-                            res = await send_zapi_message(phone, m, dry_run=dry_run)
+                            res = await send_whatsapp_message(phone, m, dry_run=dry_run)
                             results.append(res)
                             if idx < len(msgs) - 1:
                                 await asyncio.sleep(2)
@@ -330,86 +342,42 @@ def start_scheduler_thread():
 # ==============================================================================
 # CAMADA DE SEGURANÇA E AUTENTICAÇÃO DO MCP
 # ==============================================================================
-class TokenAuthMiddleware(BaseHTTPMiddleware):
+PUBLIC_PATHS = {"/health"}
+
+class TokenNaURL:
     """
-    Middleware de segurança para validar tokens de acesso nas requisições ao MCP.
-    Suporta:
-      - Header 'Authorization: Bearer <token>' ou 'Authorization: <token>'
-      - Header customizado 'X-MCP-Token: <token>' ou 'X-API-Key: <token>'
-      - Query parameter '?token=<token>' ou '?api_key=<token>'
+    Middleware ASGI puro (não interfere no streaming) que valida o token na URL: /mcp?token=<MCP_TOKEN>.
+    /health fica público para o healthcheck do Easypanel.
     """
-    async def dispatch(self, request: Request, call_next):
-        # 1. Permite requisições preflight do navegador (CORS)
-        if request.method == "OPTIONS":
-            return await call_next(request)
+    def __init__(self, app):
+        self.app = app
 
-        # 2. Rotas públicas de diagnóstico e saúde da VPS
-        if request.url.path in ["/", "/health", "/ping"]:
-            return await call_next(request)
-
-        # 3. Se MCP_AUTH_TOKEN não estiver configurado no Easypanel, permite acesso aberto
-        if not MCP_AUTH_TOKEN:
-            return await call_next(request)
-
-        # 4. Extração do token fornecido
-        provided_token = None
-        auth_header = request.headers.get("Authorization", "").strip()
-        if auth_header.startswith("Bearer "):
-            provided_token = auth_header[7:].strip()
-        elif auth_header:
-            provided_token = auth_header
-        elif "x-mcp-token" in request.headers:
-            provided_token = request.headers.get("x-mcp-token", "").strip()
-        elif "x-api-key" in request.headers:
-            provided_token = request.headers.get("x-api-key", "").strip()
-        elif "token" in request.query_params:
-            provided_token = request.query_params.get("token", "").strip()
-        elif "api_key" in request.query_params:
-            provided_token = request.query_params.get("api_key", "").strip()
-
-        # 5. Validação com tempo constante (proteção contra timing attacks)
-        if not provided_token or not secrets.compare_digest(provided_token, MCP_AUTH_TOKEN):
-            client_ip = request.client.host if request.client else "desconhecido"
-            logger.warning(f"[401 Unauthorized] Tentativa de acesso bloqueada em {request.url.path} (IP: {client_ip}) - Token ausente ou invalido")
-            return JSONResponse(
-                {
-                    "error": "Unauthorized",
-                    "message": "Token de autenticacao ausente ou invalido. Forneca o token via Header 'Authorization: Bearer <token>' ou Query Param '?token=<token>'."
-                },
-                status_code=401,
-                headers={"WWW-Authenticate": "Bearer"}
-            )
-
-        return await call_next(request)
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["path"] not in PUBLIC_PATHS:
+            qs = parse_qs(scope.get("query_string", b"").decode())
+            token = (qs.get("token") or [""])[0]
+            # Validação com tempo constante (proteção contra timing attacks)
+            if not hmac.compare_digest(token.encode(), MCP_TOKEN.encode()):
+                client = scope.get("client") or ("desconhecido",)
+                logger.warning(f"[401 Unauthorized] Acesso bloqueado em {scope['path']} (IP: {client[0]}) - token ausente ou invalido")
+                await JSONResponse({"error": "unauthorized"}, status_code=401)(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
 
 # ==============================================================================
 # FASTMCP SERVER (STREAMABLE HTTP)
 # ==============================================================================
-mcp = FastMCP("zapi-whatsapp")
+mcp = FastMCP("whatsapp-evolution")
 
-# Rotas operacionais e de Health Check para o Easypanel
+# Health Check público para o Easypanel (não expõe nomes nem telefones)
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request: Request) -> JSONResponse:
-    accounts = load_accounts()
     return JSONResponse({
-        "status": "healthy",
+        "status": "ok",
         "transport": "streamable-http",
         "endpoint": "/mcp",
-        "auth_enabled": bool(MCP_AUTH_TOKEN),
-        "instance_configured": bool(ZAPI_INSTANCE_ID),
-        "accounts_count": len(accounts),
-        "accounts": [f"{a.get('name')} ({a.get('phone')})" for a in accounts]
-    })
-
-@mcp.custom_route("/", methods=["GET"])
-async def root_view(request: Request) -> JSONResponse:
-    return JSONResponse({
-        "service": "Z-API WhatsApp MCP Server",
-        "protocol": "Streamable HTTP",
-        "mcp_endpoint": "/mcp",
-        "auth_enabled": bool(MCP_AUTH_TOKEN),
-        "health": "/health",
-        "docs": "Conecte o Claude Desktop informando a URL terminando com /mcp (ou /mcp?token=<token> se autenticado)"
+        "provider": "evolution-api",
+        "accounts_count": len(load_accounts())
     })
 
 # Ferramentas do MCP
@@ -436,7 +404,7 @@ async def send_whatsapp(
     dry_run: bool = False
 ) -> str:
     """
-    Envia uma ou mais mensagens imediatas via WhatsApp Z-API.
+    Envia uma ou mais mensagens imediatas via WhatsApp (Evolution API).
     
     Args:
         to: Destinatário(s). Aceita nome, primeiro nome ou apelido de QUALQUER account cadastrado
@@ -460,7 +428,7 @@ async def send_whatsapp(
         acc_res = []
 
         for m_idx, msg in enumerate(msg_list):
-            res = await send_zapi_message(phone, msg, dry_run=dry_run)
+            res = await send_whatsapp_message(phone, msg, dry_run=dry_run)
             acc_res.append(res)
             total_msgs += 1
             if m_idx < len(msg_list) - 1:
@@ -506,7 +474,7 @@ def schedule_whatsapp(
     except Exception as e:
         return f"❌ Erro no formato do horário: {e}"
 
-    now = datetime.now()
+    now = now_local()
     if target_dt <= now:
         return f"❌ O horário ({target_dt.strftime('%d/%m/%Y %H:%M')}) precisa ser no futuro."
 
@@ -556,7 +524,7 @@ def cancel_scheduled_message(job_id: str) -> str:
     for j in queue:
         if j.get("job_id") == job_id.strip() and j.get("status") == "PENDING":
             j["status"] = "CANCELLED"
-            j["cancelled_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            j["cancelled_at"] = now_local().strftime("%Y-%m-%d %H:%M:%S")
             found = True
     if found:
         _save_queue(queue)
@@ -566,19 +534,9 @@ def cancel_scheduled_message(job_id: str) -> str:
 # ==============================================================================
 # INICIALIZAÇÃO VIA STREAMABLE HTTP (/mcp)
 # ==============================================================================
+app = mcp.http_app(path="/mcp", middleware=[Middleware(TokenNaURL)], stateless_http=True)
+
 if __name__ == "__main__":
     start_scheduler_thread()
-
-    if MCP_AUTH_TOKEN:
-        logger.info("[AUTH ATIVA] Requisicoes ao /mcp exigem MCP_AUTH_TOKEN valido.")
-    else:
-        logger.warning("[AUTH DESATIVADA] MCP_AUTH_TOKEN nao definido. O servidor esta acessivel sem senha.")
-
-    logger.info(f"Iniciando Z-API MCP Server (Streamable HTTP) em http://{HOST}:{PORT}/mcp")
-    mcp.run(
-        transport="http",
-        host=HOST,
-        port=PORT,
-        path="/mcp",
-        middleware=[Middleware(TokenAuthMiddleware)],
-    )
+    logger.info(f"Iniciando WhatsApp MCP Server (Evolution API, Streamable HTTP) em http://{HOST}:{PORT}/mcp")
+    uvicorn.run(app, host=HOST, port=PORT, proxy_headers=True, forwarded_allow_ips="*")
